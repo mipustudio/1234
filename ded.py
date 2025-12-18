@@ -24,7 +24,13 @@ from aiogram.types import (
 )
 
 # ==================== КОНФИГУРАЦИЯ ====================
-API_TOKEN = 'BOT_TOKEN'  # Замените на токен от @BotFather!
+TOKEN = os.getenv('BOT_TOKEN')
+if not TOKEN:
+    logger.error("Не найден BOT_TOKEN в переменных окружения!")
+    raise ValueError("Установите BOT_TOKEN в настройках Bothost")
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher(bot)
 BOT_USERNAME = 'secretdedmorozs_bot'  # Имя бота без @
 
 # ID администраторов (укажите свои Telegram ID)
@@ -1122,4 +1128,5 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
+
     asyncio.run(main())
