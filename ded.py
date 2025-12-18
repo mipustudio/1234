@@ -56,7 +56,7 @@ if ADMIN_IDS_STR:
         ADMIN_IDS = []
 
 # Если нужно установить ваш ID вручную в коде (раскомментируйте строку ниже):
-# ADMIN_IDS = [671065514]  # Ваш Telegram ID
+ADMIN_IDS = [671065514]  # Ваш Telegram ID
 
 logger.info(f"✅ Бот инициализирован. Администраторы: {ADMIN_IDS if ADMIN_IDS else 'не указаны'}")
 
@@ -890,3 +890,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
