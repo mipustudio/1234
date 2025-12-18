@@ -43,7 +43,7 @@ if not TOKEN:
     raise ValueError("Установите BOT_TOKEN в настройках Bothost")
 
 # Дополнительные настройки из переменных окружения (опционально)
-BOT_USERNAME = os.getenv('BOT_USERNAME', 'ваш_бот')  # Значение по умолчанию
+BOT_USERNAME = os.getenv('BOT_USERNAME', 'secretdedmorozs_bot')  # Значение по умолчанию
 ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '')  # ID через запятую: "123456,789012"
 
 # Преобразуем строку с ID администраторов в список
@@ -890,4 +890,5 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
 
