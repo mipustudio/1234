@@ -2,6 +2,7 @@
 """
 🎅 Тайный Дедушка Мороз - Telegram бот для организации обмена подарками
 Версия для aiogram 3.x с поддержкой переменных окружения (Bothost.ru)
+ИСПРАВЛЕННАЯ ВЕРСИЯ: исправлены ошибки с пользователями и статистикой
 """
 
 import asyncio
@@ -11,8 +12,8 @@ import sqlite3
 import random
 import os
 import html
-from datetime import datetime
-from typing import List, Tuple, Optional
+from datetime import datetime, timedelta
+from typing import List, Tuple, Optional, Dict, Any
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command, CommandStart
@@ -43,7 +44,7 @@ if not TOKEN:
     raise ValueError("Установите BOT_TOKEN в настройках Bothost")
 
 # Дополнительные настройки из переменных окружения (опционально)
-BOT_USERNAME = os.getenv('BOT_USERNAME', 'secretdedmorozs_bot')  # Значение по умолчанию
+BOT_USERNAME = os.getenv('BOT_USERNAME', 'ваш_бот')  # Значение по умолчанию
 ADMIN_IDS_STR = os.getenv('ADMIN_IDS', '')  # ID через запятую: "123456,789012"
 
 # Преобразуем строку с ID администраторов в список
@@ -66,6 +67,7 @@ class Database:
         self.conn = sqlite3.connect(db_name, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.create_tables()
+        logger.info("✅ База данных подключена")
     
     def create_tables(self):
         cursor = self.conn.cursor()
@@ -179,15 +181,37 @@ def generate_invite_code():
 
 def get_user(tg_id: int):
     """Получить пользователя по TG ID"""
-    return db.fetchone("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
+    try:
+        user = db.fetchone("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
+        if user:
+            logger.debug(f"✅ Пользователь найден: tg_id={tg_id}, username={user['username']}")
+            return user
+        else:
+            logger.debug(f"⚠️ Пользователь не найден в БД: tg_id={tg_id}")
+            return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка при поиске пользователя tg_id={tg_id}: {e}")
+        return None
 
 def create_user(tg_id: int, username: str, first_name: str, last_name: str = ""):
     """Создать нового пользователя"""
-    db.execute(
-        "INSERT OR IGNORE INTO users (tg_id, username, first_name, last_name, is_active) VALUES (?, ?, ?, ?, ?)",
-        (tg_id, username, first_name, last_name, 1)
-    )
-    return get_user(tg_id)
+    try:
+        db.execute(
+            "INSERT OR IGNORE INTO users (tg_id, username, first_name, last_name, is_active) VALUES (?, ?, ?, ?, ?)",
+            (tg_id, username, first_name, last_name, 1)
+        )
+        logger.info(f"✅ Создан новый пользователь: {first_name} (id: {tg_id})")
+        return get_user(tg_id)
+    except Exception as e:
+        logger.error(f"❌ Ошибка при создании пользователя {tg_id}: {e}")
+        return None
+
+def get_or_create_user(tg_id: int, username: str, first_name: str, last_name: str = ""):
+    """Получить существующего пользователя или создать нового"""
+    user = get_user(tg_id)
+    if not user:
+        user = create_user(tg_id, username, first_name, last_name)
+    return user
 
 def get_room(room_id: int):
     """Получить комнату по ID"""
@@ -250,26 +274,90 @@ def is_admin(user_id: int) -> bool:
 
 def get_all_users(active_only: bool = True):
     """Получить всех пользователей"""
-    if active_only:
-        return db.fetchall("SELECT * FROM users WHERE is_active = 1")
-    else:
-        return db.fetchall("SELECT * FROM users")
+    try:
+        if active_only:
+            users = db.fetchall("SELECT * FROM users WHERE is_active = 1")
+        else:
+            users = db.fetchall("SELECT * FROM users")
+        
+        logger.debug(f"📊 Получено пользователей: {len(users) if users else 0}")
+        return users or []
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении пользователей: {e}")
+        return []
 
 def count_all_users():
     """Посчитать всех пользователей"""
-    result = db.fetchone("SELECT COUNT(*) as count FROM users")
-    return result['count'] if result else 0
+    try:
+        result = db.fetchone("SELECT COUNT(*) as count FROM users")
+        if result and 'count' in result:
+            count = result['count']
+            logger.debug(f"📊 Всего пользователей в БД: {count}")
+            return count
+        else:
+            logger.warning("⚠️ Запрос COUNT(*) вернул None или пустой результат")
+            return 0
+    except Exception as e:
+        logger.error(f"❌ Ошибка при подсчете пользователей: {e}")
+        return 0
+
+def count_active_users():
+    """Посчитать активных пользователей"""
+    try:
+        result = db.fetchone("SELECT COUNT(*) as count FROM users WHERE is_active = 1")
+        return result['count'] if result and 'count' in result else 0
+    except Exception as e:
+        logger.error(f"❌ Ошибка при подсчете активных пользователей: {e}")
+        return 0
 
 def get_user_by_id(user_id: int):
     """Получить пользователя по ID"""
     return db.fetchone("SELECT * FROM users WHERE id = ?", (user_id,))
+
+def get_room_stats():
+    """Получить статистику по комнатам"""
+    try:
+        total_rooms = db.fetchone("SELECT COUNT(*) as count FROM rooms")
+        active_rooms = db.fetchone("SELECT COUNT(*) as count FROM rooms WHERE is_active = 1")
+        exchanges_started = db.fetchone("SELECT COUNT(*) as count FROM rooms WHERE exchange_started = 1")
+        
+        stats = {
+            'total_rooms': total_rooms['count'] if total_rooms else 0,
+            'active_rooms': active_rooms['count'] if active_rooms else 0,
+            'exchanges_started': exchanges_started['count'] if exchanges_started else 0
+        }
+        
+        logger.debug(f"📊 Статистика комнат: {stats}")
+        return stats
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении статистики комнат: {e}")
+        return {'total_rooms': 0, 'active_rooms': 0, 'exchanges_started': 0}
+
+def get_new_users_last_days(days: int = 7):
+    """Получить количество новых пользователей за последние N дней"""
+    try:
+        date_threshold = datetime.now() - timedelta(days=days)
+        result = db.fetchone(
+            "SELECT COUNT(*) as count FROM users WHERE created_at > ?",
+            (date_threshold.strftime('%Y-%m-%d %H:%M:%S'),)
+        )
+        return result['count'] if result and 'count' in result else 0
+    except Exception as e:
+        logger.error(f"❌ Ошибка при подсчете новых пользователей: {e}")
+        return 0
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     """Начало работы с ботом - команда /start"""
     user = message.from_user
-    db_user = create_user(user.id, user.username, user.first_name, user.last_name or "")
+    
+    # Получаем или создаем пользователя
+    db_user = get_or_create_user(user.id, user.username, user.first_name, user.last_name or "")
+    
+    if not db_user:
+        await message.answer("❌ Не удалось создать ваш профиль. Попробуйте снова.")
+        return
     
     # Проверяем, есть ли параметр приглашения
     if len(message.text.split()) > 1:
@@ -352,6 +440,18 @@ async def cmd_profile(message: Message):
 @router.message(Command("create_room"))
 async def cmd_create_room(message: Message, state: FSMContext):
     """Создание новой комнаты"""
+    # Получаем или создаем пользователя
+    user = get_or_create_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.first_name,
+        message.from_user.last_name or ""
+    )
+    
+    if not user:
+        await message.answer("❌ Ошибка: не удалось создать ваш профиль.")
+        return
+    
     await message.answer("Введите название для новой комнаты (до 50 символов):")
     await state.set_state(UserStates.waiting_room_name)
 
@@ -360,9 +460,22 @@ async def process_room_name(message: Message, state: FSMContext):
     """Обработка названия комнаты"""
     room_name = message.text.strip()[:50]
     
+    # Получаем пользователя (он должен быть создан в cmd_create_room)
     user = get_user(message.from_user.id)
+    
     if not user:
-        await message.answer("Ошибка: пользователь не найден")
+        # Если пользователь все же не найден, создаем его
+        logger.warning(f"🔄 Пользователь не найден при создании комнаты, создаем...")
+        user_data = message.from_user
+        user = create_user(
+            user_data.id, 
+            user_data.username, 
+            user_data.first_name, 
+            user_data.last_name or ""
+        )
+    
+    if not user:
+        await message.answer("❌ Критическая ошибка: не удалось найти или создать ваш профиль.")
         await state.clear()
         return
     
@@ -372,43 +485,50 @@ async def process_room_name(message: Message, state: FSMContext):
         invite_code = generate_invite_code()
     
     # Создаем комнату
-    db.execute(
-        "INSERT INTO rooms (name, owner_id, invite_code) VALUES (?, ?, ?)",
-        (room_name, user['id'], invite_code)
-    )
-    
-    room_id = db.fetchone("SELECT last_insert_rowid() as id")['id']
-    
-    # Добавляем создателя как участника
-    db.execute(
-        "INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)",
-        (room_id, user['id'])
-    )
-    
-    # Формируем ссылку
-    invite_link = f"https://t.me/{BOT_USERNAME}?start=invite_{invite_code}"
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="🔗 Поделиться ссылкой",
-                url=f"https://t.me/share/url?url={invite_link}&text=Присоединяйся к Тайному Дедушке Морозу!"
-            )
-        ],
-        [
-            InlineKeyboardButton(text="👥 Участники", callback_data=f"room_users_{room_id}"),
-            InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"room_settings_{room_id}")
-        ]
-    ])
-    
-    await message.answer(
-        f"🎄 Комната создана!\n\n"
-        f"Название: {room_name}\n"
-        f"Код приглашения: {invite_code}\n"
-        f"Ссылка: {invite_link}\n\n"
-        f"Отправьте ссылку друзьям или дайте им код для входа через /join",
-        reply_markup=keyboard
-    )
+    try:
+        db.execute(
+            "INSERT INTO rooms (name, owner_id, invite_code) VALUES (?, ?, ?)",
+            (room_name, user['id'], invite_code)
+        )
+        
+        room_id = db.fetchone("SELECT last_insert_rowid() as id")['id']
+        
+        # Добавляем создателя как участника
+        db.execute(
+            "INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)",
+            (room_id, user['id'])
+        )
+        
+        # Формируем ссылку
+        invite_link = f"https://t.me/{BOT_USERNAME}?start=invite_{invite_code}"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔗 Поделиться ссылкой",
+                    url=f"https://t.me/share/url?url={invite_link}&text=Присоединяйся к Тайному Дедушке Морозу!"
+                )
+            ],
+            [
+                InlineKeyboardButton(text="👥 Участники", callback_data=f"room_users_{room_id}"),
+                InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"room_settings_{room_id}")
+            ]
+        ])
+        
+        await message.answer(
+            f"🎄 Комната создана!\n\n"
+            f"Название: {room_name}\n"
+            f"Код приглашения: {invite_code}\n"
+            f"Ссылка: {invite_link}\n\n"
+            f"Отправьте ссылку друзьям или дайте им код для входа через /join",
+            reply_markup=keyboard
+        )
+        
+        logger.info(f"✅ Создана новая комната: '{room_name}' (ID: {room_id}) пользователем {user['first_name']}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при создании комнаты: {e}")
+        await message.answer("❌ Произошла ошибка при создании комнаты. Попробуйте еще раз.")
     
     await state.clear()
 
@@ -436,9 +556,16 @@ async def join_room_by_code(message: Message, invite_code: str):
         await message.answer("❌ Комната не найдена или закрыта")
         return
     
-    user = get_user(message.from_user.id)
+    # Получаем или создаем пользователя
+    user = get_or_create_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.first_name,
+        message.from_user.last_name or ""
+    )
+    
     if not user:
-        await message.answer("Сначала запустите /start")
+        await message.answer("❌ Не удалось создать ваш профиль.")
         return
     
     # Проверяем, не состоит ли уже в комнате
@@ -463,34 +590,41 @@ async def join_room_by_code(message: Message, invite_code: str):
         return
     
     # Добавляем участника
-    db.execute(
-        "INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)",
-        (room['id'], user['id'])
-    )
-    
-    # Получаем владельца
-    owner = db.fetchone("SELECT * FROM users WHERE id = ?", (room['owner_id'],))
-    
-    await message.answer(
-        f"✅ Вы присоединились к комнате {room['name']}!\n"
-        f"Владелец: {owner['first_name']}\n"
-        f"Участников: {participants_count + 1}/{room['max_participants']}\n\n"
-        f"Заполните профиль через /profile чтобы Дедушке Морозу было проще выбрать подарок!"
-    )
-    
-    # Уведомляем владельца
-    if owner['tg_id'] != message.from_user.id:
-        try:
-            bot = message.bot
-            await bot.send_message(
-                owner['tg_id'],
-                f"👤 Новый участник!\n"
-                f"В комнате {room['name']} присоединился:\n"
-                f"{message.from_user.first_name} (@{message.from_user.username or 'нет'})\n"
-                f"Всего участников: {participants_count + 1}"
-            )
-        except:
-            pass
+    try:
+        db.execute(
+            "INSERT INTO room_participants (room_id, user_id) VALUES (?, ?)",
+            (room['id'], user['id'])
+        )
+        
+        # Получаем владельца
+        owner = get_user_by_id(room['owner_id'])
+        
+        await message.answer(
+            f"✅ Вы присоединились к комнате {room['name']}!\n"
+            f"Владелец: {owner['first_name'] if owner else 'Неизвестно'}\n"
+            f"Участников: {participants_count + 1}/{room['max_participants']}\n\n"
+            f"Заполните профиль через /profile чтобы Дедушке Морозу было проще выбрать подарок!"
+        )
+        
+        # Уведомляем владельца
+        if owner and owner['tg_id'] != message.from_user.id:
+            try:
+                bot = message.bot
+                await bot.send_message(
+                    owner['tg_id'],
+                    f"👤 Новый участник!\n"
+                    f"В комнате {room['name']} присоединился:\n"
+                    f"{message.from_user.first_name} (@{message.from_user.username or 'нет'})\n"
+                    f"Всего участников: {participants_count + 1}"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось уведомить владельца комнаты: {e}")
+                
+        logger.info(f"✅ Пользователь {user['first_name']} присоединился к комнате {room['name']}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при присоединении к комнате: {e}")
+        await message.answer("❌ Произошла ошибка при присоединении к комнате.")
 
 @router.message(Command("my_rooms"))
 async def cmd_my_rooms(message: Message):
@@ -534,7 +668,7 @@ async def show_room_info(message: Message, room_id: int):
         return
     
     # Получаем владельца
-    owner = db.fetchone("SELECT * FROM users WHERE id = ?", (room['owner_id'],))
+    owner = get_user_by_id(room['owner_id'])
     
     # Получаем участников
     participants = db.fetchall('''
@@ -544,14 +678,15 @@ async def show_room_info(message: Message, room_id: int):
         ORDER BY rp.joined_at
     ''', (room_id,))
     
-    participants_count = len(participants)
+    participants_count = len(participants) if participants else 0
     
     # Формируем список участников
     participants_list = []
-    for idx, p in enumerate(participants, 1):
-        status = "✅" if p['wishlist'] and p['address'] else "⚠️" if p['wishlist'] or p['address'] else "❌"
-        prefix = "👑" if p['id'] == room['owner_id'] else f"{idx}."
-        participants_list.append(f"{prefix} {status} {p['first_name']}")
+    if participants:
+        for idx, p in enumerate(participants, 1):
+            status = "✅" if p['wishlist'] and p['address'] else "⚠️" if p['wishlist'] or p['address'] else "❌"
+            prefix = "👑" if p['id'] == room['owner_id'] else f"{idx}."
+            participants_list.append(f"{prefix} {status} {p['first_name']}")
     
     participants_text = "\n".join(participants_list) if participants_list else "Нет участников"
     
@@ -589,7 +724,7 @@ async def show_room_info(message: Message, room_id: int):
     
     await message.answer(
         f"Комната: {room['name']}\n"
-        f"Владелец: {'Вы' if user['id'] == room['owner_id'] else owner['first_name']}\n"
+        f"Владелец: {'Вы' if user['id'] == room['owner_id'] else owner['first_name'] if owner else 'Неизвестно'}\n"
         f"Участников: {participants_count}/{room['max_participants']}\n"
         f"Статус: {status_emoji} {status_text}\n"
         f"Код: {room['invite_code']}\n\n"
@@ -606,6 +741,9 @@ async def cmd_admin(message: Message):
         return
     
     total_users = count_all_users()
+    active_users = count_active_users()
+    new_users_week = get_new_users_last_days(7)
+    room_stats = get_room_stats()
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -621,12 +759,96 @@ async def cmd_admin(message: Message):
     stats_text = (
         f"👑 АДМИН-ПАНЕЛЬ\n\n"
         f"📊 Статистика бота:\n"
-        f"• Пользователей: {total_users}\n"
-        f"• Администраторов: {len(ADMIN_IDS)}\n\n"
+        f"• Всего пользователей: {total_users}\n"
+        f"• Активных пользователей: {active_users}\n"
+        f"• Новых за неделю: {new_users_week}\n"
+        f"• Всего комнат: {room_stats['total_rooms']}\n"
+        f"• Активных комнат: {room_stats['active_rooms']}\n"
+        f"• Начатых обменов: {room_stats['exchanges_started']}\n\n"
         f"Выберите действие:"
     )
     
     await message.answer(stats_text, reply_markup=keyboard)
+
+@admin_router.callback_query(F.data == "admin_stats")
+async def callback_admin_stats(callback: CallbackQuery):
+    """Детальная статистика"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа")
+        return
+    
+    total_users = count_all_users()
+    active_users = count_active_users()
+    
+    # Статистика по дням (последние 7 дней)
+    try:
+        stats_by_day = db.fetchall('''
+            SELECT 
+                date(created_at) as day,
+                COUNT(*) as count
+            FROM users
+            WHERE created_at > date('now', '-7 days')
+            GROUP BY date(created_at)
+            ORDER BY day DESC
+        ''')
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении статистики по дням: {e}")
+        stats_by_day = []
+    
+    # Статистика по комнатам
+    room_stats = get_room_stats()
+    
+    # Топ комнат по участникам
+    try:
+        top_rooms = db.fetchall('''
+            SELECT 
+                r.name,
+                r.owner_id,
+                COUNT(rp.user_id) as participants_count
+            FROM rooms r
+            LEFT JOIN room_participants rp ON r.id = rp.room_id
+            WHERE r.is_active = 1
+            GROUP BY r.id
+            ORDER BY participants_count DESC
+            LIMIT 5
+        ''')
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении топ комнат: {e}")
+        top_rooms = []
+    
+    stats_text = (
+        f"📊 ДЕТАЛЬНАЯ СТАТИСТИКА\n\n"
+        f"👥 Пользователи:\n"
+        f"├ Всего: {total_users}\n"
+        f"└ Активных: {active_users}\n\n"
+    )
+    
+    if stats_by_day:
+        stats_text += f"📈 Регистрации за 7 дней:\n"
+        for stat in stats_by_day[:5]:  # Показываем последние 5 дней
+            stats_text += f"├ {stat['day']}: {stat['count']} чел.\n"
+        stats_text += "\n"
+    
+    stats_text += (
+        f"🏠 Комнаты:\n"
+        f"├ Всего: {room_stats['total_rooms']}\n"
+        f"├ Активных: {room_stats['active_rooms']}\n"
+        f"└ С начатым обменом: {room_stats['exchanges_started']}\n\n"
+    )
+    
+    if top_rooms:
+        stats_text += f"🏆 Топ комнат по участникам:\n"
+        for i, room in enumerate(top_rooms, 1):
+            owner = get_user_by_id(room['owner_id'])
+            owner_name = owner['first_name'] if owner else "Неизвестно"
+            stats_text += f"{i}. {room['name']} ({room['participants_count']} чел.) - владелец: {owner_name}\n"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")]
+    ])
+    
+    await callback.message.edit_text(stats_text, reply_markup=keyboard)
+    await callback.answer()
 
 @admin_router.callback_query(F.data == "admin_broadcast")
 async def callback_admin_broadcast(callback: CallbackQuery, state: FSMContext):
@@ -701,30 +923,42 @@ async def callback_broadcast_confirm_yes(callback: CallbackQuery, state: FSMCont
     
     # Создаем запись о рассылке
     admin_user = get_user(callback.from_user.id)
-    db.execute(
-        "INSERT INTO broadcasts (admin_id, message, total_users) VALUES (?, ?, ?)",
-        (admin_user['id'], broadcast_message, total_users)
-    )
+    if not admin_user:
+        await callback.message.answer("❌ Ошибка: администратор не найден в БД")
+        await state.clear()
+        return
     
-    broadcast_id = db.fetchone("SELECT last_insert_rowid() as id")['id']
-    
-    # Отправляем сообщение о начале рассылки
-    await callback.message.edit_text(
-        f"🔄 НАЧАЛАСЬ РАССЫЛКА\n\n"
-        f"Отправка сообщения {total_users} пользователям...\n"
-        f"Это может занять некоторое время."
-    )
-    
-    # Запускаем асинхронную рассылку
-    asyncio.create_task(
-        send_broadcast(
-            callback.bot,
-            broadcast_message,
-            total_users,
-            broadcast_id,
-            callback.message.chat.id
+    try:
+        db.execute(
+            "INSERT INTO broadcasts (admin_id, message, total_users) VALUES (?, ?, ?)",
+            (admin_user['id'], broadcast_message, total_users)
         )
-    )
+        
+        broadcast_id = db.fetchone("SELECT last_insert_rowid() as id")['id']
+        
+        # Отправляем сообщение о начале рассылки
+        await callback.message.edit_text(
+            f"🔄 НАЧАЛАСЬ РАССЫЛКА\n\n"
+            f"Отправка сообщения {total_users} пользователям...\n"
+            f"Это может занять некоторое время."
+        )
+        
+        # Запускаем асинхронную рассылку
+        asyncio.create_task(
+            send_broadcast(
+                callback.bot,
+                broadcast_message,
+                total_users,
+                broadcast_id,
+                callback.message.chat.id
+            )
+        )
+        
+        logger.info(f"✅ Начата рассылка #{broadcast_id} для {total_users} пользователей")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при создании рассылки: {e}")
+        await callback.message.answer("❌ Произошла ошибка при создании рассылки.")
     
     await state.clear()
     await callback.answer()
@@ -737,12 +971,9 @@ async def send_broadcast(bot: Bot, message: str, total_users: int, broadcast_id:
     
     for user in users:
         try:
-            # Экранируем HTML-сущности для безопасности
-            safe_message = html.escape(message)
-            
             await bot.send_message(
                 chat_id=user['tg_id'],
-                text=safe_message
+                text=message
             )
             sent_count += 1
             
@@ -757,15 +988,18 @@ async def send_broadcast(bot: Bot, message: str, total_users: int, broadcast_id:
             await asyncio.sleep(0.1)
             
         except Exception as e:
-            logger.error(f"Failed to send broadcast to {user['tg_id']}: {e}")
+            logger.error(f"❌ Не удалось отправить рассылку пользователю {user['tg_id']}: {e}")
             failed_count += 1
             continue
     
     # Обновляем статистику в базе данных
-    db.execute(
-        "UPDATE broadcasts SET sent_users = ?, failed_users = ? WHERE id = ?",
-        (sent_count, failed_count, broadcast_id)
-    )
+    try:
+        db.execute(
+            "UPDATE broadcasts SET sent_users = ?, failed_users = ? WHERE id = ?",
+            (sent_count, failed_count, broadcast_id)
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка при обновлении статистики рассылки: {e}")
     
     # Отправляем финальный отчет
     success_rate = (sent_count / total_users * 100) if total_users > 0 else 0
@@ -781,6 +1015,112 @@ async def send_broadcast(bot: Bot, message: str, total_users: int, broadcast_id:
     )
     
     await bot.send_message(chat_id=admin_chat_id, text=report_text)
+    logger.info(f"✅ Рассылка #{broadcast_id} завершена. Успешно: {sent_count}/{total_users}")
+
+@admin_router.callback_query(F.data == "admin_users")
+async def callback_admin_users(callback: CallbackQuery):
+    """Управление пользователями"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа")
+        return
+    
+    # Получаем последних 10 пользователей
+    try:
+        recent_users = db.fetchall('''
+            SELECT * FROM users 
+            ORDER BY created_at DESC 
+            LIMIT 10
+        ''')
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении пользователей: {e}")
+        recent_users = []
+    
+    if not recent_users:
+        await callback.message.edit_text("👥 Пользователи не найдены")
+        await callback.answer()
+        return
+    
+    users_text = "👥 ПОСЛЕДНИЕ ПОЛЬЗОВАТЕЛИ\n\n"
+    
+    for i, user in enumerate(recent_users, 1):
+        status = "✅" if user['is_active'] else "❌"
+        
+        users_text += (
+            f"{i}. {user['first_name']} {user['last_name'] or ''}\n"
+            f"   ID: {user['tg_id']}\n"
+            f"   @{user['username'] or 'нет username'}\n"
+            f"   Статус: {status}\n\n"
+        )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")
+        ]
+    ])
+    
+    await callback.message.edit_text(users_text, reply_markup=keyboard)
+    await callback.answer()
+
+@admin_router.callback_query(F.data == "admin_rooms")
+async def callback_admin_rooms(callback: CallbackQuery):
+    """Управление комнатами"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа")
+        return
+    
+    # Получаем последние 10 комнат
+    try:
+        recent_rooms = db.fetchall('''
+            SELECT r.*, u.first_name as owner_name
+            FROM rooms r
+            JOIN users u ON r.owner_id = u.id
+            ORDER BY r.created_at DESC
+            LIMIT 10
+        ''')
+    except Exception as e:
+        logger.error(f"❌ Ошибка при получении комнат: {e}")
+        recent_rooms = []
+    
+    if not recent_rooms:
+        await callback.message.edit_text("🏠 Комнаты не найдены")
+        await callback.answer()
+        return
+    
+    rooms_text = "🏠 ПОСЛЕДНИЕ КОМНАТЫ\n\n"
+    
+    for i, room in enumerate(recent_rooms, 1):
+        status = "✅" if room['is_active'] else "❌"
+        exchange_status = "🎄 Начат" if room['exchange_started'] else "🕐 Ожидание"
+        participants = count_room_participants(room['id'])
+        
+        rooms_text += (
+            f"{i}. {room['name']}\n"
+            f"   ID: {room['id']}\n"
+            f"   Владелец: {room['owner_name']}\n"
+            f"   Участников: {participants}/{room['max_participants']}\n"
+            f"   Код: {room['invite_code']}\n"
+            f"   Статус: {status}\n"
+            f"   Обмен: {exchange_status}\n\n"
+        )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")
+        ]
+    ])
+    
+    await callback.message.edit_text(rooms_text, reply_markup=keyboard)
+    await callback.answer()
+
+@admin_router.callback_query(F.data == "admin_back")
+async def callback_admin_back(callback: CallbackQuery):
+    """Вернуться в главное меню админ-панели"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа")
+        return
+    
+    await cmd_admin(callback.message)
+    await callback.answer()
 
 # ==================== ОБРАБОТЧИКИ CALLBACK ====================
 @router.callback_query(F.data == "edit_wishlist")
@@ -803,6 +1143,23 @@ async def callback_edit_address(callback: CallbackQuery, state: FSMContext):
         "Для офлайн встреч можно указать 'Встречаемся лично'."
     )
     await state.set_state(UserStates.editing_address)
+    await callback.answer()
+
+@router.callback_query(F.data == "view_profile")
+async def callback_view_profile(callback: CallbackQuery):
+    """Просмотр профиля"""
+    user = get_user(callback.from_user.id)
+    if user:
+        profile_text = (
+            f"👤 Ваш профиль\n\n"
+            f"Имя: {user['first_name']}\n"
+            f"Username: @{user['username'] or 'нет'}\n\n"
+            f"📝 Список желаний:\n"
+            f"{user['wishlist'] or 'Не заполнено'}\n\n"
+            f"🏠 Адрес:\n"
+            f"{user['address'] or 'Не заполнено'}"
+        )
+        await callback.message.answer(profile_text)
     await callback.answer()
 
 @router.message(UserStates.editing_wishlist)
@@ -837,7 +1194,7 @@ async def process_address(message: Message, state: FSMContext):
     )
     await state.clear()
 
-# ... (остальные callback-обработчики из предыдущих версий кода) ...
+# ... (остальные callback-обработчики можно добавить позже) ...
 
 # ==================== ФУНКЦИИ ДЛЯ ОБМЕНА ====================
 def create_santa_pairs(user_ids: List[int], room_id: int) -> List[Tuple[int, int]]:
@@ -884,11 +1241,13 @@ async def main():
     ])
     
     logger.info("✅ Бот Тайный Дедушка Мороз запущен!")
+    logger.info(f"📊 Статистика при запуске:")
+    logger.info(f"  • Пользователей: {count_all_users()}")
+    logger.info(f"  • Комнат: {get_room_stats()['total_rooms']}")
+    logger.info(f"  • Администраторов: {len(ADMIN_IDS)}")
     
     # Запускаем поллинг
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
     asyncio.run(main())
-
-
